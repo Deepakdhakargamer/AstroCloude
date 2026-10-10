@@ -114,6 +114,23 @@ export function AdminPanel({ onShowToast, currentUser, onLogout }: AdminPanelPro
   const [tickets, setTickets] = useState<AdminSupportTicket[]>(() => getStoredTickets());
 
   useEffect(() => {
+    const handleCategoriesUpdate = (e: any) => {
+      if (e.detail) setCategories(e.detail);
+      else setCategories(getStoredCategories());
+    };
+    const handlePlansUpdate = (e: any) => {
+      if (e.detail) setPlans(e.detail);
+      else setPlans(getStoredPlans());
+    };
+    window.addEventListener('astro_categories_changed', handleCategoriesUpdate);
+    window.addEventListener('astro_plans_changed', handlePlansUpdate);
+    return () => {
+      window.removeEventListener('astro_categories_changed', handleCategoriesUpdate);
+      window.removeEventListener('astro_plans_changed', handlePlansUpdate);
+    };
+  }, []);
+
+  useEffect(() => {
     getStoredUsers().then(data => setUsers(data));
     const handleUsersUpdate = (e: any) => {
       if (e.detail) setUsers(e.detail);

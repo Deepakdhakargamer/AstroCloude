@@ -2,10 +2,11 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import {defineConfig} from 'vite';
+import {sqliteApiPlugin} from './src/server/sqliteApiPlugin';
 
 export default defineConfig(() => {
   return {
-    plugins: [react(), tailwindcss()],
+    plugins: [react(), tailwindcss(), sqliteApiPlugin()],
     resolve: {
       alias: {
         '@': path.resolve(__dirname, '.'),

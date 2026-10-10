@@ -1,6 +1,13 @@
 import { get, set } from 'idb-keyval';
 import { AdminHostingPlan } from '../types';
 import { formatCpuSpec, formatRamSpec, formatDiskSpec } from './specFormat';
+import { 
+  fetchPlansFromDb, 
+  syncPlansToDb, 
+  savePlanToDb, 
+  updatePlanInDb, 
+  deletePlanFromDb 
+} from './databaseClient';
 
 const PLANS_STORAGE_KEY = 'astro_hosting_plans';
 const PLANS_IDB_KEY = 'astro_hosting_plans_idb';
@@ -217,11 +224,9 @@ function savePlansToLocalStorage(plans: AdminHostingPlan[]): void {
     const serialized = JSON.stringify(compactPlans);
     
     try {
-      // Removing first prevents browser memory spikes / quota double-allocation
       localStorage.removeItem(PLANS_STORAGE_KEY);
       localStorage.setItem(PLANS_STORAGE_KEY, serialized);
     } catch {
-      // If quota is still tight, store absolute essential fields only
       try {
         const minimal = compactPlans.map(p => ({
           id: p.id,
@@ -243,12 +248,11 @@ function savePlansToLocalStorage(plans: AdminHostingPlan[]): void {
         localStorage.removeItem(PLANS_STORAGE_KEY);
         localStorage.setItem(PLANS_STORAGE_KEY, JSON.stringify(minimal));
       } catch {
-        // LocalStorage is completely full from external items; gracefully skip.
-        // Authoritative plans remain 100% intact in IndexedDB and in-memory cache.
+        // Fallback safely
       }
     }
   } catch {
-    // Non-fatal, suppress error to prevent test runner/AIS triggers
+    // Non-fatal
   }
 }
 
@@ -257,7 +261,6 @@ try {
   if (typeof localStorage !== 'undefined') {
     const rawStored = localStorage.getItem(PLANS_STORAGE_KEY);
     if (rawStored) {
-      // If legacy oversized storage detected (> 60KB or data URLs), clean up immediately to recover storage quota
       if (rawStored.length > 60000 || rawStored.includes('data:image')) {
         try {
           const parsed = JSON.parse(rawStored);
@@ -286,18 +289,38 @@ if (!memoryPlansCache) {
   memoryPlansCache = INITIAL_PLANS.map(sanitizePlan);
 }
 
-// Asynchronously load and sync authoritative plans from IndexedDB on startup
+// Asynchronously load authoritative plans from SQLite database on startup
 if (typeof window !== 'undefined') {
-  get(PLANS_IDB_KEY)
-    .then((idbPlans) => {
-      if (Array.isArray(idbPlans) && idbPlans.length > 0) {
-        memoryPlansCache = (idbPlans as AdminHostingPlan[]).map(sanitizePlan);
-        window.dispatchEvent(new CustomEvent('astro_plans_changed', { detail: memoryPlansCache }));
-      } else if (memoryPlansCache && memoryPlansCache.length > 0) {
+  // 1. Check SQLite backend database first
+  fetchPlansFromDb()
+    .then((dbPlans) => {
+      if (Array.isArray(dbPlans) && dbPlans.length > 0) {
+        memoryPlansCache = dbPlans.map(sanitizePlan);
+        savePlansToLocalStorage(memoryPlansCache);
         set(PLANS_IDB_KEY, memoryPlansCache).catch(() => {});
+        window.dispatchEvent(new CustomEvent('astro_plans_changed', { detail: memoryPlansCache }));
+      } else {
+        // Fallback to IndexedDB if API is warming up
+        get(PLANS_IDB_KEY)
+          .then((idbPlans) => {
+            if (Array.isArray(idbPlans) && idbPlans.length > 0) {
+              memoryPlansCache = (idbPlans as AdminHostingPlan[]).map(sanitizePlan);
+              window.dispatchEvent(new CustomEvent('astro_plans_changed', { detail: memoryPlansCache }));
+            }
+          })
+          .catch(() => {});
       }
     })
-    .catch(() => {});
+    .catch(() => {
+      get(PLANS_IDB_KEY)
+        .then((idbPlans) => {
+          if (Array.isArray(idbPlans) && idbPlans.length > 0) {
+            memoryPlansCache = (idbPlans as AdminHostingPlan[]).map(sanitizePlan);
+            window.dispatchEvent(new CustomEvent('astro_plans_changed', { detail: memoryPlansCache }));
+          }
+        })
+        .catch(() => {});
+    });
 }
 
 export const getStoredPlans = (): AdminHostingPlan[] => {
@@ -331,12 +354,41 @@ export const updateStoredPlans = (plans: AdminHostingPlan[]) => {
     window.dispatchEvent(new CustomEvent('astro_plans_changed', { detail: inrPlans }));
   }
 
-  // 2. Authoritative persistence in IndexedDB (stores multi-MB objects without browser quota limits)
+  // 2. Authoritative persistence in SQLite server database
+  syncPlansToDb(inrPlans).catch((err) => {
+    console.error('Failed to sync plans to SQLite database:', err);
+  });
+
+  // 3. Local persistence in IndexedDB
   set(PLANS_IDB_KEY, inrPlans).catch((idbErr) => {
     console.warn('IndexedDB save warning for plans:', idbErr);
   });
 
-  // 3. Quota-safe sync to localStorage as instant sync fallback (never throws QuotaExceededError)
+  // 4. Quota-safe sync to localStorage as instant sync fallback
   savePlansToLocalStorage(inrPlans);
 };
 
+// Asynchronous CRUD helpers for components that want async promises
+export async function addPlanAsync(plan: AdminHostingPlan): Promise<AdminHostingPlan> {
+  const current = getStoredPlans();
+  const created = await savePlanToDb(plan);
+  const finalPlan = created || plan;
+  updateStoredPlans([...current, finalPlan]);
+  return finalPlan;
+}
+
+export async function updatePlanAsync(id: string, updates: Partial<AdminHostingPlan>): Promise<AdminHostingPlan | null> {
+  const current = getStoredPlans();
+  const updatedFromDb = await updatePlanInDb(id, updates);
+  const updatedList = current.map(p => p.id === id ? { ...p, ...updates, ...(updatedFromDb || {}) } : p);
+  updateStoredPlans(updatedList);
+  return updatedFromDb || updatedList.find(p => p.id === id) || null;
+}
+
+export async function deletePlanAsync(id: string): Promise<boolean> {
+  const current = getStoredPlans();
+  const success = await deletePlanFromDb(id);
+  const updatedList = current.filter(p => p.id !== id);
+  updateStoredPlans(updatedList);
+  return success;
+}

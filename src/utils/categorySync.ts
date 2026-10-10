@@ -1,4 +1,11 @@
 import { AdminCategory } from '../types';
+import { 
+  fetchCategoriesFromDb, 
+  syncCategoriesToDb, 
+  saveCategoryToDb, 
+  updateCategoryInDb, 
+  deleteCategoryFromDb 
+} from './databaseClient';
 
 const STORAGE_KEY = 'astro_admin_categories_v2';
 
@@ -21,7 +28,8 @@ export const INITIAL_CATEGORIES: AdminCategory[] = [
     colorTheme: 'purple',
     seoMetaTitle: 'High-Performance Minecraft Server Hosting | AstroCloude',
     seoMetaDescription: 'Instant setup NVMe Minecraft server hosting with unlimited slots and DDoS protection.',
-    seoKeywords: 'minecraft server hosting, nvme minecraft, modded minecraft host'
+    seoKeywords: 'minecraft server hosting, nvme minecraft, modded minecraft host',
+    features: ['High Performance Node', 'Instant Deployment', 'DDoS Protection', 'Cloud Backups']
   },
   { 
     id: 'cat-2', 
@@ -41,7 +49,8 @@ export const INITIAL_CATEGORIES: AdminCategory[] = [
     colorTheme: 'blue',
     seoMetaTitle: 'Cloud VPS Hosting with NVMe SSD | AstroCloude',
     seoMetaDescription: 'Deploy scalable KVM Virtual Private Servers with full root access in seconds.',
-    seoKeywords: 'vps hosting, cloud vps, kvm vps, nvme vps'
+    seoKeywords: 'vps hosting, cloud vps, kvm vps, nvme vps',
+    features: ['Root Access', 'Instant Setup', 'Dedicated IPv4', 'Automated Daily Backups']
   },
   { 
     id: 'cat-3', 
@@ -61,7 +70,8 @@ export const INITIAL_CATEGORIES: AdminCategory[] = [
     colorTheme: 'emerald',
     seoMetaTitle: '24/7 Discord Bot Hosting | AstroCloude',
     seoMetaDescription: 'Keep your Discord bots online 24/7 with zero downtime container hosting.',
-    seoKeywords: 'discord bot hosting, python bot host, nodejs bot hosting'
+    seoKeywords: 'discord bot hosting, python bot host, nodejs bot hosting',
+    features: ['Always Online 24/7', 'GitHub Auto-Deploy', 'Live Logs Console', 'Discord Webhook Alerts']
   },
   { 
     id: 'cat-4', 
@@ -81,7 +91,8 @@ export const INITIAL_CATEGORIES: AdminCategory[] = [
     colorTheme: 'rose',
     seoMetaTitle: 'Dedicated Server & Bare Metal Hosting | AstroCloude',
     seoMetaDescription: 'Enterprise dedicated bare metal servers with high-speed unmetered network ports.',
-    seoKeywords: 'dedicated servers, bare metal, enterprise hosting'
+    seoKeywords: 'dedicated servers, bare metal, enterprise hosting',
+    features: ['IPMI / KVM-over-IP', 'Custom ISO Mount', 'BGP Session Available', 'SLA 99.99%']
   },
   { 
     id: 'cat-5', 
@@ -101,7 +112,8 @@ export const INITIAL_CATEGORIES: AdminCategory[] = [
     colorTheme: 'amber',
     seoMetaTitle: 'Fast NVMe Web Hosting & cPanel | AstroCloude',
     seoMetaDescription: 'Lightning-fast web hosting powered by LiteSpeed web servers and NVMe storage.',
-    seoKeywords: 'web hosting, cpanel hosting, wordpress host'
+    seoKeywords: 'web hosting, cpanel hosting, wordpress host',
+    features: ['Free Let\'s Encrypt SSL', 'Daily JetBackup Protection', 'NVMe SSD Speed', 'Unlimited Email Accounts']
   },
   { 
     id: 'cat-6', 
@@ -121,27 +133,58 @@ export const INITIAL_CATEGORIES: AdminCategory[] = [
     colorTheme: 'cyan',
     seoMetaTitle: 'Multi-Game Server Hosting (ARK, Rust, CS2) | AstroCloude',
     seoMetaDescription: 'High-performance game server hosting with instant mod installation and DDoS protection.',
-    seoKeywords: 'game server hosting, rust server, ark server, cs2 server'
+    seoKeywords: 'game server hosting, rust server, ark server, cs2 server',
+    features: ['Instant Setup', 'Game Switching', 'DDoS Protection', 'Mod Manager']
   },
 ];
 
-export function getStoredCategories(): AdminCategory[] {
-  try {
+let memoryCategoriesCache: AdminCategory[] | null = null;
+
+// Bootstrap from localStorage if present
+try {
+  if (typeof localStorage !== 'undefined') {
     const item = localStorage.getItem(STORAGE_KEY);
     if (item) {
       const parsed: AdminCategory[] = JSON.parse(item);
-      const defaultDescs = [
-        'High-performance NVMe Minecraft server nodes with DDoS protection',
-        'Scalable KVM Virtual Private Servers with full root access',
-        'Always-online low latency container hosting for your bots',
-        'Enterprise-grade dedicated hardware for heavy workloads',
-        'Lightning-fast cPanel web hosting with free SSL certificates',
-        'Dedicated game server hosting for ARK, Rust, CS2, Valheim'
-      ];
-      return parsed.map(cat => ({
-        ...cat,
-        description: defaultDescs.includes(cat.description || '') ? '' : cat.description
-      }));
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        memoryCategoriesCache = parsed;
+      }
+    }
+  }
+} catch {
+  // Ignore initial read error
+}
+
+if (!memoryCategoriesCache) {
+  memoryCategoriesCache = INITIAL_CATEGORIES;
+}
+
+// Asynchronously sync from SQLite database on startup
+if (typeof window !== 'undefined') {
+  fetchCategoriesFromDb().then((dbCategories) => {
+    if (Array.isArray(dbCategories) && dbCategories.length > 0) {
+      memoryCategoriesCache = dbCategories;
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(dbCategories));
+      } catch {}
+      window.dispatchEvent(new CustomEvent('astro_categories_changed', { detail: dbCategories }));
+    }
+  }).catch(() => {});
+}
+
+export function getStoredCategories(): AdminCategory[] {
+  if (memoryCategoriesCache && memoryCategoriesCache.length > 0) {
+    return memoryCategoriesCache;
+  }
+
+  try {
+    const item = typeof localStorage !== 'undefined' ? localStorage.getItem(STORAGE_KEY) : null;
+    if (item) {
+      const parsed: AdminCategory[] = JSON.parse(item);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        memoryCategoriesCache = parsed;
+        return parsed;
+      }
     }
   } catch (e) {
     console.warn('Error reading categories from localStorage', e);
@@ -150,11 +193,49 @@ export function getStoredCategories(): AdminCategory[] {
 }
 
 export function saveStoredCategories(categories: AdminCategory[]): void {
-  try {
-    localStorage.removeItem(STORAGE_KEY);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(categories));
+  memoryCategoriesCache = categories;
+
+  // 1. Instantly dispatch event so all components react immediately
+  if (typeof window !== 'undefined') {
     window.dispatchEvent(new CustomEvent('astro_categories_changed', { detail: categories }));
+  }
+
+  // 2. Persist in localStorage as local fallback
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(categories));
+    }
   } catch (e) {
     console.warn('Error saving categories to localStorage', e);
   }
+
+  // 3. Permanently save to server SQLite database
+  syncCategoriesToDb(categories).catch((err) => {
+    console.error('Failed to sync categories to SQLite database:', err);
+  });
+}
+
+// Asynchronous CRUD helpers for components that want async promises
+export async function addCategoryAsync(category: AdminCategory): Promise<AdminCategory> {
+  const current = getStoredCategories();
+  const created = await saveCategoryToDb(category);
+  const finalCat = created || category;
+  saveStoredCategories([...current, finalCat]);
+  return finalCat;
+}
+
+export async function updateCategoryAsync(id: string, updates: Partial<AdminCategory>): Promise<AdminCategory | null> {
+  const current = getStoredCategories();
+  const updatedFromDb = await updateCategoryInDb(id, updates);
+  const updatedList = current.map(c => c.id === id ? { ...c, ...updates, ...(updatedFromDb || {}) } : c);
+  saveStoredCategories(updatedList);
+  return updatedFromDb || updatedList.find(c => c.id === id) || null;
+}
+
+export async function deleteCategoryAsync(id: string): Promise<boolean> {
+  const current = getStoredCategories();
+  const success = await deleteCategoryFromDb(id);
+  const updatedList = current.filter(c => c.id !== id);
+  saveStoredCategories(updatedList);
+  return success;
 }
